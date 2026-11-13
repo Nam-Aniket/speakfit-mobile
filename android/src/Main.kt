@@ -14,6 +14,7 @@ import android.net.wifi.WifiManager
 import android.os.*
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.widget.*
 import java.io.File
 import java.net.HttpURLConnection
@@ -32,6 +33,8 @@ const val PART_MS = 30 * 60 * 1000L   // a new file every 30 min: a crash loses 
 
 fun recDir(c: Context) = File(c.getExternalFilesDir(null), "recordings").apply { mkdirs() }
 fun prefs(c: Context): SharedPreferences = c.getSharedPreferences("sfm", Context.MODE_PRIVATE)
+/** Debug APK only (make_apk.sh --debug): assets override part length and Mac address. Release APKs have no such assets. */
+fun debugAsset(c: Context, name: String): String? = try { c.assets.open(name).bufferedReader().readText().trim() } catch (e: Exception) { null }
 fun clock() = SimpleDateFormat("EEE HH:mm", Locale.UK).format(Date())
 
 class MainActivity : Activity() {
@@ -66,6 +69,11 @@ class MainActivity : Activity() {
             addView(btn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = pad })
             addView(status)
             addView(sync)
+            // target SDK 35 draws edge to edge: keep content clear of the status and navigation bars
+            setOnApplyWindowInsetsListener { v, ins ->
+                val b = ins.getInsets(WindowInsets.Type.systemBars())
+                v.setPadding(pad, pad + b.top, pad, pad + b.bottom); ins
+            }
         })
         Sync.schedule(this)
     }
@@ -111,9 +119,10 @@ class RecorderService : Service() {
     private var part = 0
     private var session = ""
     private var mode = "free"
+    private var partMs = PART_MS
     private var wake: PowerManager.WakeLock? = null
     private val h = Handler(Looper.getMainLooper())
-    private val rotate = object : Runnable { override fun run() { stopPart(); startPart(); h.postDelayed(this, PART_MS) } }
+    private val rotate = object : Runnable { override fun run() { stopPart(); startPart(); h.postDelayed(this, partMs) } }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -127,7 +136,8 @@ class RecorderService : Service() {
         wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sfm:rec").apply { acquire(10 * 3600 * 1000L) }
         startedAt = System.currentTimeMillis()
         startPart()
-        h.postDelayed(rotate, PART_MS)
+        partMs = debugAsset(this, "debug_part_ms")?.toLong() ?: PART_MS
+        h.postDelayed(rotate, partMs)
         return START_NOT_STICKY
     }
 
@@ -239,6 +249,7 @@ object Sync {
     } catch (e: Exception) { false }
 
     private fun findMac(c: Context): String? {
+        debugAsset(c, "debug_host")?.let { return it }
         prefs(c).getString("host", null)?.let { if (ping(it)) return it }
         val found = discover(c) ?: return null
         prefs(c).edit().putString("host", found).apply()
